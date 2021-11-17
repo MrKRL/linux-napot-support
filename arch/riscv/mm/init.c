@@ -6,6 +6,8 @@
  *  Nick Kossifidis <mick@ics.forth.gr>
  */
 
+#include "linux/printk.h"
+#include "linux/types.h"
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/memblock.h>
@@ -68,6 +70,7 @@ struct pt_alloc_ops {
 	p4d_t *(*get_p4d_virt)(phys_addr_t pa);
 	phys_addr_t (*alloc_p4d)(uintptr_t va);
 #endif
+
 };
 
 static phys_addr_t dma32_phys_limit __initdata;
@@ -332,6 +335,7 @@ static void __init create_pte_mapping(pte_t *ptep,
 }
 
 #ifndef __PAGETABLE_PMD_FOLDED
+
 static pmd_t trampoline_pmd[PTRS_PER_PMD] __page_aligned_bss;
 static pmd_t fixmap_pmd[PTRS_PER_PMD] __page_aligned_bss;
 static pmd_t early_pmd[PTRS_PER_PMD] __initdata __aligned(PAGE_SIZE);
@@ -340,6 +344,7 @@ static pmd_t early_pmd[PTRS_PER_PMD] __initdata __aligned(PAGE_SIZE);
 #define trampoline_pmd ((pmd_t *)XIP_FIXUP(trampoline_pmd))
 #define fixmap_pmd     ((pmd_t *)XIP_FIXUP(fixmap_pmd))
 #define early_pmd      ((pmd_t *)XIP_FIXUP(early_pmd))
+#define early_dtb_next  early_dtb_pmd
 #endif /* CONFIG_XIP_KERNEL */
 
 static pmd_t *__init get_pmd_virt_early(phys_addr_t pa)
@@ -362,7 +367,6 @@ static pmd_t *__init get_pmd_virt_late(phys_addr_t pa)
 static phys_addr_t __init alloc_pmd_early(uintptr_t va)
 {
 	BUG_ON((va - kernel_map.virt_addr) >> PGDIR_SHIFT);
-
 	return (uintptr_t)early_pmd;
 }
 
@@ -406,12 +410,32 @@ static void __init create_pmd_mapping(pmd_t *pmdp,
 
 	create_pte_mapping(ptep, va, pa, sz, prot);
 }
-#endif /* __PAGETABLE_PMD_FOLDED */
+
+#define pgd_next_t		pmd_t
+#define alloc_pgd_next(__va)	pt_ops.alloc_pmd(__va)
+#define get_pgd_next_virt(__pa)	pt_ops.get_pmd_virt(__pa)
+#define create_pgd_next_mapping(__nextp, __va, __pa, __sz, __prot)	\
+	create_pmd_mapping(__nextp, __va, __pa, __sz, __prot)
+#define fixmap_pgd_next		fixmap_pmd
+#define trampoline_pgd_next trampoline_pmd
+#else
+#define pgd_next_t		pte_t
+#define alloc_pgd_next(__va)	pt_ops.alloc_pte(__va)
+#define get_pgd_next_virt(__pa)	pt_ops.get_pte_virt(__pa)
+#define create_pgd_next_mapping(__nextp, __va, __pa, __sz, __prot)	\
+	create_pte_mapping(__nextp, __va, __pa, __sz, __prot)
+#define fixmap_pgd_next		fixmap_pte
+#define create_pmd_mapping(__pmdp, __va, __pa, __sz, __prot)
+#endif
+
 
 #ifndef __PAGETABLE_PUD_FOLDED
+
 static pud_t trampoline_pud[PTRS_PER_PUD] __page_aligned_bss;
 static pud_t fixmap_pud[PTRS_PER_PUD] __page_aligned_bss;
 static pud_t early_pud[PTRS_PER_PUD] __initdata __aligned(PAGE_SIZE);
+
+
 static pud_t *__init get_pud_virt_early(phys_addr_t pa)
 {
 	/* Before MMU is enabled */
@@ -450,39 +474,49 @@ static phys_addr_t __init alloc_pud_late(uintptr_t va)
 	return __pa(vaddr);
 }
 
-void __init create_pud_mapping(pud_t *pudp,
+static void __init create_pud_mapping(pud_t *pudp,
 				      uintptr_t va, phys_addr_t pa,
 				      phys_addr_t sz, pgprot_t prot)
 {
 	pmd_t *pmdp;
-	phys_addr_t next_phys;
+	phys_addr_t pmd_phys;
 	uintptr_t pud_idx = pud_index(va);
 
 	if (sz == PUD_SIZE) {
-		if (pud_val(pudp[pud_idx]) == 0)
+		if (pud_none(pudp[pud_idx]))
 			pudp[pud_idx] = pfn_pud(PFN_DOWN(pa), prot);
 		return;
 	}
 
-	if (pud_val(pudp[pud_idx]) == 0) {
-		next_phys = pt_ops.alloc_pmd(va);
-		pudp[pud_idx] = pfn_pud(PFN_DOWN(next_phys), PAGE_TABLE);
-		pmdp = pt_ops.get_pmd_virt(next_phys);
+	if (pud_none(pudp[pud_idx])) {
+		pmd_phys = pt_ops.alloc_pmd(va);
+		pudp[pud_idx] = pfn_pud(PFN_DOWN(pmd_phys), PAGE_TABLE);
+		pmdp = pt_ops.get_pmd_virt(pmd_phys);
 		memset(pmdp, 0, PAGE_SIZE);
 	} else {
-		next_phys = PFN_PHYS(_pud_pfn(pudp[pud_idx]));
-		pmdp = pt_ops.get_pmd_virt(next_phys);
+		pmd_phys = PFN_PHYS(_pud_pfn(pudp[pud_idx]));
+		pmdp = pt_ops.get_pmd_virt(pmd_phys);
 	}
 
 	create_pmd_mapping(pmdp, va, pa, sz, prot);
 }
-
+#define early_dtb_next  early_dtb_pud
+#define pgd_next_t		pud_t
+#define alloc_pgd_next(__va)	pt_ops.alloc_pud(__va)
+#define get_pgd_next_virt(__pa)	pt_ops.get_pud_virt(__pa)
+#define create_pgd_next_mapping(__nextp, __va, __pa, __sz, __prot)	\
+	create_pud_mapping(__nextp, __va, __pa, __sz, __prot)
+#define fixmap_pgd_next		fixmap_pud
+#define trampoline_pgd_next trampoline_pud
 #endif
 
+
 #ifndef __PAGETABLE_P4D_FOLDED
+
 static p4d_t trampoline_p4d[PTRS_PER_P4D] __page_aligned_bss;
 static p4d_t fixmap_p4d[PTRS_PER_P4D] __page_aligned_bss;
 static p4d_t early_p4d[PTRS_PER_P4D] __initdata __aligned(PAGE_SIZE);
+
 
 static p4d_t *__init get_p4d_virt_early(phys_addr_t pa)
 {
@@ -522,65 +556,42 @@ static phys_addr_t __init alloc_p4d_late(uintptr_t va)
 	return __pa(vaddr);
 }
 
-void __init create_p4d_mapping(p4d_t *p4dp,
+static void __init create_p4d_mapping(p4d_t *p4dp,
 				      uintptr_t va, phys_addr_t pa,
 				      phys_addr_t sz, pgprot_t prot)
 {
-	pud_t *nextp;
-	phys_addr_t next_phys;
+	pud_t *pudp;
+	phys_addr_t pud_phys;
 	uintptr_t p4d_idx = p4d_index(va);
 
 	if (sz == P4D_SIZE) {
-		if (p4d_val(p4dp[p4d_idx]) == 0)
+		if (p4d_none(p4dp[p4d_idx]))
 			p4dp[p4d_idx] = pfn_p4d(PFN_DOWN(pa), prot);
 		return;
 	}
 
-	if (p4d_val(p4dp[p4d_idx]) == 0) {
-		next_phys = pt_ops.alloc_pud(va);
-		p4dp[p4d_idx] = pfn_p4d(PFN_DOWN(next_phys), PAGE_TABLE);
-		nextp = pt_ops.get_pud_virt(next_phys);
-		memset(nextp, 0, PAGE_SIZE);
+	if (p4d_none(p4dp[p4d_idx])) {
+		pud_phys = pt_ops.alloc_pud(va);
+		p4dp[p4d_idx] = pfn_p4d(PFN_DOWN(pud_phys), PAGE_TABLE);
+		pudp = pt_ops.get_pud_virt(pud_phys);
+		memset(pudp, 0, PAGE_SIZE);
 	} else {
-		next_phys = PFN_PHYS(_p4d_pfn(p4dp[p4d_idx]));
-		nextp = pt_ops.get_pud_virt(next_phys);
+		pud_phys = PFN_PHYS(_p4d_pfn(p4dp[p4d_idx]));
+		pudp = pt_ops.get_pud_virt(pud_phys);
 	}
 
-	create_pud_mapping(nextp, va, pa, sz, prot);
+	create_pud_mapping(pudp, va, pa, sz, prot);
 }
-#endif
-
-#if defined(__PAGETABLE_PMD_FOLDED) /* Sv32 */
-#define pgd_next_t		pte_t
-#define alloc_pgd_next(__va)	pt_ops.alloc_pte(__va)
-#define get_pgd_next_virt(__pa)	pt_ops.get_pte_virt(__pa)
-#define create_pgd_next_mapping(__nextp, __va, __pa, __sz, __prot)	\
-	create_pte_mapping(__nextp, __va, __pa, __sz, __prot)
-#define fixmap_pgd_next		fixmap_pte
-#define create_pmd_mapping(__pmdp, __va, __pa, __sz, __prot)
-#elif defined(__PAGETABLE_PUD_FOLDED) /* Sv39 */
-#define pgd_next_t		pmd_t
-#define alloc_pgd_next(__va)	pt_ops.alloc_pmd(__va)
-#define get_pgd_next_virt(__pa)	pt_ops.get_pmd_virt(__pa)
-#define create_pgd_next_mapping(__nextp, __va, __pa, __sz, __prot)	\
-	create_pmd_mapping(__nextp, __va, __pa, __sz, __prot)
-#define fixmap_pgd_next		fixmap_pmd
-#define dtb_pgd_next		early_dtb_pmd
-#define trampoline_pgd_next	trampoline_pmd
-#elif defined(__PAGETABLE_P4D_FOLDED) /* Sv48 */
-#error "Sv48 is not supported now"
-#else /* Sv57 */
+#define early_dtb_next  early_dtb_p4d
 #define pgd_next_t		p4d_t
-#define p4d_next_t		pud_t
-#define pud_next_t		pmd_t
 #define alloc_pgd_next(__va)	pt_ops.alloc_p4d(__va)
 #define get_pgd_next_virt(__pa)	pt_ops.get_p4d_virt(__pa)
 #define create_pgd_next_mapping(__nextp, __va, __pa, __sz, __prot)	\
 	create_p4d_mapping(__nextp, __va, __pa, __sz, __prot)
 #define fixmap_pgd_next		fixmap_p4d
-#define dtb_pgd_next		early_dtb_p4d
-#define trampoline_pgd_next	trampoline_p4d
+#define trampoline_pgd_next trampoline_p4d
 #endif
+
 
 void __init create_pgd_mapping(pgd_t *pgdp,
 				      uintptr_t va, phys_addr_t pa,
@@ -607,69 +618,6 @@ void __init create_pgd_mapping(pgd_t *pgdp,
 	}
 
 	create_pgd_next_mapping(nextp, va, pa, sz, prot);
-}
-
-static inline void __init complete_fixmap_mapping(pgd_t *pgdp, uintptr_t va)
-{
-	create_pgd_mapping(pgdp, va,
-			   (uintptr_t)fixmap_pgd_next, PGDIR_SIZE, PAGE_TABLE);
-#ifndef __PAGETABLE_P4D_FOLDED
-	create_p4d_mapping(fixmap_p4d, va,
-			   (uintptr_t)fixmap_pud, P4D_SIZE, PAGE_TABLE);
-#endif
-#ifndef __PAGETABLE_PUD_FOLDED
-	create_pud_mapping(fixmap_pud, va,
-			   (uintptr_t)fixmap_pmd, PUD_SIZE, PAGE_TABLE);
-#endif
-#ifndef __PAGETABLE_PMD_FOLDED
-	create_pmd_mapping(fixmap_pmd, va,
-			   (uintptr_t)fixmap_pte, PMD_SIZE, PAGE_TABLE);
-#endif
-}
-
-static inline void __init complete_trampoline_mapping(pgd_t *pgdp, uintptr_t va)
-{
-	create_pgd_mapping(pgdp, va,
-			   (uintptr_t)trampoline_pgd_next, PGDIR_SIZE, PAGE_TABLE);
-#ifndef __PAGETABLE_P4D_FOLDED
-	create_p4d_mapping(trampoline_p4d, va,
-			   (uintptr_t)trampoline_pud, P4D_SIZE, PAGE_TABLE);
-#endif
-#ifndef __PAGETABLE_PUD_FOLDED
-	create_pud_mapping(trampoline_pud, va,
-			   (uintptr_t)trampoline_pmd, PUD_SIZE, PAGE_TABLE);
-#endif
-#ifndef __PAGETABLE_PMD_FOLDED
-#ifdef CONFIG_XIP_KERNEL
-	create_pmd_mapping(trampoline_pmd, va,
-			   kernel_map.xiprom, PMD_SIZE, PAGE_KERNEL_EXEC);
-#else
-	create_pmd_mapping(trampoline_pmd, va,
-			   kernel_map.phys_addr, PMD_SIZE, PAGE_KERNEL_EXEC);
-#endif
-#endif
-}
-
-static inline void __init complete_dtb_mapping(pgd_t *pgdp, uintptr_t va, phys_addr_t pa)
-{
-	create_pgd_mapping(pgdp, va,
-			   IS_ENABLED(CONFIG_64BIT) ? (uintptr_t)dtb_pgd_next : pa,
-			   PGDIR_SIZE,
-			   IS_ENABLED(CONFIG_64BIT) ? PAGE_TABLE : PAGE_KERNEL);
-#ifndef __PAGETABLE_P4D_FOLDED
-	create_p4d_mapping(early_dtb_p4d, va,
-			(uintptr_t)early_dtb_pud, P4D_SIZE, PAGE_TABLE);
-#endif
-#ifndef __PAGETABLE_PUD_FOLDED
-	create_pud_mapping(early_dtb_pud, va,
-			(uintptr_t)early_dtb_pmd, PUD_SIZE, PAGE_TABLE);
-#endif
-#ifndef __PAGETABLE_PMD_FOLDED
-	create_pmd_mapping(early_dtb_pmd, va,
-			pa, PMD_SIZE, PAGE_KERNEL);
-	create_pmd_mapping(early_dtb_pmd, va + PMD_SIZE,
-			pa + PMD_SIZE, PMD_SIZE, PAGE_KERNEL);
-#endif
 }
 
 static uintptr_t __init best_map_size(phys_addr_t base, phys_addr_t size)
@@ -794,8 +742,25 @@ static void __init create_fdt_early_page_table(pgd_t *pgdir, uintptr_t dtb_pa)
 #ifndef CONFIG_BUILTIN_DTB
 	uintptr_t pa = dtb_pa & ~(PMD_SIZE - 1);
 
-	complete_dtb_mapping(early_pg_dir, DTB_EARLY_BASE_VA, pa);
+	create_pgd_mapping(early_pg_dir, DTB_EARLY_BASE_VA,
+			   IS_ENABLED(CONFIG_64BIT) ? (uintptr_t)early_dtb_next : pa,
+			   PGDIR_SIZE,
+			   IS_ENABLED(CONFIG_64BIT) ? PAGE_TABLE : PAGE_KERNEL);
 
+#ifndef __PAGETABLE_P4D_FOLDED
+    create_p4d_mapping(early_dtb_p4d, DTB_EARLY_BASE_VA,
+              (uintptr_t)early_dtb_pud, P4D_SIZE, PAGE_TABLE);
+#endif
+#ifndef __PAGETABLE_PUD_FOLDED
+  create_pud_mapping(early_dtb_pud, DTB_EARLY_BASE_VA,
+            (uintptr_t)early_dtb_pmd, PUD_SIZE, PAGE_TABLE);
+#endif
+#ifndef __PAGETABLE_PMD_FOLDED
+    create_pmd_mapping(early_dtb_pmd, DTB_EARLY_BASE_VA,
+              pa, PMD_SIZE, PAGE_KERNEL);
+      create_pmd_mapping(early_dtb_pmd,  DTB_EARLY_BASE_VA+ PMD_SIZE,
+                pa + PMD_SIZE, PMD_SIZE, PAGE_KERNEL);
+#endif
 	dtb_early_va = (void *)DTB_EARLY_BASE_VA + (dtb_pa & (PMD_SIZE - 1));
 #else
 	/*
@@ -812,8 +777,9 @@ static void __init create_fdt_early_page_table(pgd_t *pgdir, uintptr_t dtb_pa)
 
 asmlinkage void __init setup_vm(uintptr_t dtb_pa)
 {
-	pmd_t __maybe_unused fix_bmap_spmd, fix_bmap_epmd;
+  pmd_t __maybe_unused fix_bmap_spmd, fix_bmap_epmd;
 
+  _printk("setupvm");
 	kernel_map.virt_addr = KERNEL_LINK_ADDR;
 
 #ifdef CONFIG_XIP_KERNEL
@@ -835,7 +801,7 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
 	riscv_pfn_base = PFN_DOWN(kernel_map.phys_addr);
 
 	/* Sanity check alignment and size */
-	/*BUG_ON((PAGE_OFFSET % PGDIR_SIZE) != 0);*/
+	//BUG_ON((PAGE_OFFSET % PGDIR_SIZE) != 0);
 	BUG_ON((kernel_map.phys_addr % PMD_SIZE) != 0);
 
 #ifdef CONFIG_64BIT
@@ -860,13 +826,48 @@ asmlinkage void __init setup_vm(uintptr_t dtb_pa)
 	pt_ops.alloc_p4d = alloc_p4d_early;
 	pt_ops.get_p4d_virt = get_p4d_virt_early;
 #endif
-
+	
 	/* Setup early PGD for fixmap */
-	complete_fixmap_mapping(early_pg_dir, FIXADDR_START);
+	create_pgd_mapping(early_pg_dir, FIXADDR_START,
+			   (uintptr_t)fixmap_pgd_next, PGDIR_SIZE, PAGE_TABLE);
+#ifdef CONFIG_64BIT
+	create_pgd_mapping(trampoline_pg_dir, kernel_map.virt_addr,
+			   (uintptr_t)trampoline_pgd_next, PGDIR_SIZE, PAGE_TABLE);
+#ifndef __PAGETABLE_P4D_FOLDED
+	/* Setup fixmap P4D */
+	create_p4d_mapping(fixmap_p4d, FIXADDR_START,
+			   (uintptr_t)fixmap_pud, P4D_SIZE, PAGE_TABLE);
+	/* Setup trampoline PGD and PMD */
+	create_p4d_mapping(trampoline_p4d, kernel_map.virt_addr,
+			   (uintptr_t)trampoline_pud, P4D_SIZE, PAGE_TABLE);
+#endif
+#ifndef __PAGETABLE_PUD_FOLDED
+	/* Setup fixmap PUD */
+	create_pud_mapping(fixmap_pud, FIXADDR_START,
+			   (uintptr_t)fixmap_pmd, PUD_SIZE, PAGE_TABLE);
+	/* Setup trampoline PGD and PMD */
+	create_pud_mapping(trampoline_pud, kernel_map.virt_addr,
+			   (uintptr_t)trampoline_pmd, PUD_SIZE, PAGE_TABLE);
+#endif
+#ifndef __PAGETABLE_PMD_FOLDED
+	/* Setup fixmap PMD */
+	create_pmd_mapping(fixmap_pmd, FIXADDR_START,
+			   (uintptr_t)fixmap_pte, PMD_SIZE, PAGE_TABLE);
+	/* Setup trampoline PGD and PMD */
 
+#ifdef CONFIG_XIP_KERNEL
+	create_pmd_mapping(trampoline_pmd, kernel_map.virt_addr,
+			   kernel_map.xiprom, PMD_SIZE, PAGE_KERNEL_EXEC);
+#else
+	create_pmd_mapping(trampoline_pmd, kernel_map.virt_addr,
+			   kernel_map.phys_addr, PMD_SIZE, PAGE_KERNEL_EXEC);
+#endif
+#else
 	/* Setup trampoline PGD */
-	complete_trampoline_mapping(trampoline_pg_dir, kernel_map.virt_addr);
-
+	create_pgd_mapping(trampoline_pg_dir, kernel_map.virt_addr,
+			   kernel_map.phys_addr, PGDIR_SIZE, PAGE_KERNEL_EXEC);
+#endif
+#endif//64bit
 	/*
 	 * Setup early PGD covering entire kernel which will allow
 	 * us to reach paging_init(). We map all memory banks later
@@ -913,7 +914,6 @@ static void __init setup_vm_final(void)
 	uintptr_t va, map_size;
 	phys_addr_t pa, start, end;
 	u64 i;
-
 	/**
 	 * MMU is enabled at this point. But page table setup is not complete yet.
 	 * fixmap page table alloc functions should be used at this point
@@ -932,7 +932,7 @@ static void __init setup_vm_final(void)
 	pt_ops.alloc_p4d = alloc_p4d_fixmap;
 	pt_ops.get_p4d_virt = get_p4d_virt_fixmap;
 #endif
-	/* Setup swapper PGD for fixmap */
+		/* Setup swapper PGD for fixmap */
 	create_pgd_mapping(swapper_pg_dir, FIXADDR_START,
 			   __pa_symbol(fixmap_pgd_next),
 			   PGDIR_SIZE, PAGE_TABLE);
@@ -964,7 +964,6 @@ static void __init setup_vm_final(void)
 	/* Clear fixmap PTE and PMD mappings */
 	clear_fixmap(FIX_PTE);
 	clear_fixmap(FIX_PMD);
-
 	/* Move to swapper page table */
 	csr_write(CSR_SATP, PFN_DOWN(__pa_symbol(swapper_pg_dir)) | SATP_MODE);
 	local_flush_tlb_all();

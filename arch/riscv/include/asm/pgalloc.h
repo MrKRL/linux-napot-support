@@ -28,7 +28,6 @@ static inline void pmd_populate(struct mm_struct *mm,
 
 	set_pmd(pmd, __pmd((pfn << _PAGE_PFN_SHIFT) | _PAGE_TABLE));
 }
-
 #if CONFIG_PGTABLE_LEVELS > 2
 static inline void pud_populate(struct mm_struct *mm, pud_t *pud, pmd_t *pmd)
 {
@@ -37,20 +36,13 @@ static inline void pud_populate(struct mm_struct *mm, pud_t *pud, pmd_t *pmd)
 	set_pud(pud, __pud((pfn << _PAGE_PFN_SHIFT) | _PAGE_TABLE));
 }
 
-#define __pmd_free_tlb(tlb, pmd, addr)  pmd_free((tlb)->mm, pmd)
-
 #if CONFIG_PGTABLE_LEVELS > 3
-
 static inline void p4d_populate(struct mm_struct *mm, p4d_t *p4d, pud_t *pud)
 {
 	unsigned long pfn = virt_to_pfn(pud);
 
 	set_p4d(p4d, __p4d((pfn << _PAGE_PFN_SHIFT) | _PAGE_TABLE));
 }
-
-static inline void pud_free(struct mm_struct *mm, pud_t *pud);
-#define __pud_free_tlb(tlb, pud, addr)  pud_free((tlb)->mm, pud)
-
 #if CONFIG_PGTABLE_LEVELS > 4
 static inline void pgd_populate(struct mm_struct *mm, pgd_t *pgd, p4d_t *p4d)
 {
@@ -58,13 +50,12 @@ static inline void pgd_populate(struct mm_struct *mm, pgd_t *pgd, p4d_t *p4d)
 
 	set_pgd(pgd, __pgd((pfn << _PAGE_PFN_SHIFT) | _PAGE_TABLE));
 }
-
 static inline p4d_t *p4d_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-	gfp_t gfp = GFP_KERNEL_ACCOUNT;
+	gfp_t gfp = GFP_PGTABLE_USER;
 
 	if (mm == &init_mm)
-		gfp &= ~__GFP_ACCOUNT;
+		gfp = GFP_PGTABLE_KERNEL;
 	return (p4d_t *)get_zeroed_page(gfp);
 }
 
@@ -74,11 +65,9 @@ static inline void p4d_free(struct mm_struct *mm, p4d_t *p4d)
 	free_page((unsigned long)p4d);
 }
 
-#define __p4d_free_tlb(tlb, p4d, addr)  p4d_free((tlb)->mm, p4d)
-#endif /* CONFIG_PGTABLE_LEVELS > 4 */
-#endif /* CONFIG_PGTABLE_LEVELS > 3 */
-#endif /* CONFIG_PGTABLE_LEVELS > 2 */
-
+#endif/*config 3pgtablelevels*/
+#endif/*config 4pgtablelevels*/
+#endif/*config 5pgtablelevels*/
 static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
 	pgd_t *pgd;
@@ -94,6 +83,23 @@ static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 	return pgd;
 }
 
+#ifndef __PAGETABLE_PMD_FOLDED
+
+#define __pmd_free_tlb(tlb, pmd, addr)  pmd_free((tlb)->mm, pmd)
+
+#endif /* __PAGETABLE_PMD_FOLDED */
+
+#ifndef __PAGETABLE_PUD_FOLDED
+
+#define __pud_free_tlb(tlb, pud, addr)  pud_free((tlb)->mm, pud)
+
+#endif
+
+#ifndef __PAGETABLE_PMD_FOLDED
+
+#define __p4d_free_tlb(tlb, p4d, addr)  p4d_free((tlb)->mm, p4d)
+
+#endif 
 #define __pte_free_tlb(tlb, pte, buf)   \
 do {                                    \
 	pgtable_pte_page_dtor(pte);     \
